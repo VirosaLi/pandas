@@ -3,6 +3,8 @@ import operator
 import numpy as np
 import pytest
 
+from pandas.compat import is_numpy_dev
+
 from pandas.core.dtypes.common import is_list_like
 
 import pandas as pd
@@ -103,7 +105,10 @@ class TestComparison:
         Helper that performs elementwise comparisons between `array` and `other`
         """
         other = other if is_list_like(other) else [other] * len(array)
-        return np.array([op(x, y) for x, y in zip(array, other)])
+        expected = np.array([op(x, y) for x, y in zip(array, other)])
+        if isinstance(other, Series):
+            return Series(expected, index=other.index)
+        return expected
 
     def test_compare_scalar_interval(self, op, array):
         # matches first interval
@@ -130,7 +135,7 @@ class TestComparison:
         result = op(array, nulls_fixture)
         expected = self.elementwise_comparison(op, array, nulls_fixture)
 
-        if nulls_fixture is pd.NA and array.dtype != pd.IntervalDtype("int64"):
+        if nulls_fixture is pd.NA and array.dtype.subtype != "int64":
             mark = pytest.mark.xfail(
                 reason="broken for non-integer IntervalArray; see GH 31882"
             )
@@ -161,19 +166,19 @@ class TestComparison:
         other = interval_constructor(array.left, array.right)
         result = op(array, other)
         expected = self.elementwise_comparison(op, array, other)
-        tm.assert_numpy_array_equal(result, expected)
+        tm.assert_equal(result, expected)
 
         # different endpoints
         other = interval_constructor(array.left[::-1], array.right[::-1])
         result = op(array, other)
         expected = self.elementwise_comparison(op, array, other)
-        tm.assert_numpy_array_equal(result, expected)
+        tm.assert_equal(result, expected)
 
         # all nan endpoints
         other = interval_constructor([np.nan] * 4, [np.nan] * 4)
         result = op(array, other)
         expected = self.elementwise_comparison(op, array, other)
-        tm.assert_numpy_array_equal(result, expected)
+        tm.assert_equal(result, expected)
 
     def test_compare_list_like_interval_mixed_closed(
         self, op, interval_constructor, closed, other_closed
@@ -183,7 +188,7 @@ class TestComparison:
 
         result = op(array, other)
         expected = self.elementwise_comparison(op, array, other)
-        tm.assert_numpy_array_equal(result, expected)
+        tm.assert_equal(result, expected)
 
     @pytest.mark.parametrize(
         "other",
@@ -249,6 +254,7 @@ class TestComparison:
         with pytest.raises(ValueError, match="Lengths must match to compare"):
             op(array, other)
 
+    @pytest.mark.xfail(is_numpy_dev, reason="GH#39089 Numpy changed dtype inference")
     @pytest.mark.parametrize(
         "constructor, expected_type, assert_func",
         [
@@ -287,6 +293,6 @@ class TestComparison:
     def test_comparison_operations(self, scalars):
         # GH #28981
         expected = Series([False, False])
-        s = pd.Series([pd.Interval(0, 1), pd.Interval(1, 2)], dtype="interval")
+        s = Series([Interval(0, 1), Interval(1, 2)], dtype="interval")
         result = s == scalars
         tm.assert_series_equal(result, expected)

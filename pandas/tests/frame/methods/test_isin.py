@@ -1,6 +1,8 @@
 import numpy as np
 import pytest
 
+from pandas.compat import is_numpy_dev
+
 import pandas as pd
 from pandas import DataFrame, MultiIndex, Series
 import pandas._testing as tm
@@ -32,6 +34,7 @@ class TestDataFrameIsIn:
         result = df.isin(empty)
         tm.assert_frame_equal(result, expected)
 
+    @pytest.mark.xfail(is_numpy_dev, reason="GH#39089 Numpy changed dtype inference")
     def test_isin_dict(self):
         df = DataFrame({"A": ["a", "b", "c"], "B": ["a", "e", "f"]})
         d = {"A": ["a"]}
@@ -87,7 +90,7 @@ class TestDataFrameIsIn:
 
     def test_isin_tuples(self):
         # GH#16394
-        df = pd.DataFrame({"A": [1, 2, 3], "B": ["a", "b", "f"]})
+        df = DataFrame({"A": [1, 2, 3], "B": ["a", "b", "f"]})
         df["C"] = list(zip(df["A"], df["B"]))
         result = df["C"].isin([(1, "a")])
         tm.assert_series_equal(result, Series([True, False, False], name="C"))
@@ -124,10 +127,10 @@ class TestDataFrameIsIn:
         tm.assert_frame_equal(result, expected)
 
     def test_isin_against_series(self):
-        df = pd.DataFrame(
+        df = DataFrame(
             {"A": [1, 2, 3, 4], "B": [2, np.nan, 4, 4]}, index=["a", "b", "c", "d"]
         )
-        s = pd.Series([1, 3, 11, 4], index=["a", "b", "c", "d"])
+        s = Series([1, 3, 11, 4], index=["a", "b", "c", "d"])
         expected = DataFrame(False, index=df.index, columns=df.columns)
         expected["A"].loc["a"] = True
         expected.loc["d"] = True
@@ -193,14 +196,23 @@ class TestDataFrameIsIn:
     @pytest.mark.parametrize(
         "values",
         [
-            pd.DataFrame({"a": [1, 2, 3]}, dtype="category"),
-            pd.Series([1, 2, 3], dtype="category"),
+            DataFrame({"a": [1, 2, 3]}, dtype="category"),
+            Series([1, 2, 3], dtype="category"),
         ],
     )
     def test_isin_category_frame(self, values):
         # GH#34256
-        df = pd.DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
+        df = DataFrame({"a": [1, 2, 3], "b": [4, 5, 6]})
         expected = DataFrame({"a": [True, True, True], "b": [False, False, False]})
 
         result = df.isin(values)
+        tm.assert_frame_equal(result, expected)
+
+    def test_isin_read_only(self):
+        # https://github.com/pandas-dev/pandas/issues/37174
+        arr = np.array([1, 2, 3])
+        arr.setflags(write=False)
+        df = DataFrame([1, 2, 3])
+        result = df.isin(arr)
+        expected = DataFrame([True, True, True])
         tm.assert_frame_equal(result, expected)

@@ -1,5 +1,7 @@
 from copy import copy
 
+from libc.stdlib cimport free, malloc
+
 import numpy as np
 
 cimport numpy as cnp
@@ -7,7 +9,7 @@ from numpy cimport int64_t, ndarray
 
 cnp.import_array()
 
-from pandas._libs.util cimport is_array
+from pandas._libs.util cimport is_array, set_array_not_contiguous
 
 from pandas._libs.lib import is_scalar, maybe_convert_objects
 
@@ -42,7 +44,9 @@ cdef class _BaseGrouper:
                                     Slider islider, Slider vslider):
         if cached_typ is None:
             cached_ityp = self.ityp(islider.buf)
-            cached_typ = self.typ(vslider.buf, index=cached_ityp, name=self.name)
+            cached_typ = self.typ(
+                vslider.buf, dtype=vslider.buf.dtype, index=cached_ityp, name=self.name
+            )
         else:
             # See the comment in indexes/base.py about _index_data.
             # We need this for EA-backed indexes that have a reference
@@ -312,8 +316,8 @@ cdef class Slider:
 
         self.values = values
         self.buf = buf
-        self.stride = values.strides[0]
 
+        self.stride = values.strides[0]
         self.orig_data = self.buf.data
 
         self.buf.data = self.values.data
@@ -329,10 +333,6 @@ cdef class Slider:
     cdef reset(self):
         self.buf.data = self.orig_data
         self.buf.shape[0] = 0
-
-
-class InvalidApply(Exception):
-    pass
 
 
 def apply_frame_axis0(object frame, object f, object names,
@@ -356,11 +356,7 @@ def apply_frame_axis0(object frame, object f, object names,
         chunk = frame[starts[i]:ends[i]]
         object.__setattr__(chunk, 'name', names[i])
 
-        try:
             piece = f(chunk)
-        except Exception:
-            # We can't be more specific without knowing something about `f`
-            raise InvalidApply('Let this error raise above us')
 
         # Need to infer if low level index slider will cause segfaults
         require_slow_apply = i == 0 and piece is chunk
@@ -380,10 +376,92 @@ def apply_frame_axis0(object frame, object f, object names,
 
         results.append(piece)
 
-        # If the data was modified inplace we need to
-        # take the slow path to not risk segfaults
-        # we have already computed the first piece
-        if require_slow_apply:
-            break
+cdef class BlockSlider:
+    """
+    Only capable of sliding on axis=0
+    """
+    cdef:
+        object frame, dummy, index, block
+        list blocks, blk_values
+        ndarray orig_blklocs, orig_blknos
+        ndarray values
+        Slider idx_slider
+        char **base_ptrs
+        int nblocks
+        Py_ssize_t i
 
-    return results, mutated
+    def __init__(self, object frame):
+        self.frame = frame
+        self.dummy = frame[:0]
+        self.index = self.dummy.index
+
+        # GH#35417 attributes we need to restore at each step in case
+        #  the function modified them.
+        mgr = self.dummy._mgr
+        self.orig_blklocs = mgr.blklocs
+        self.orig_blknos = mgr.blknos
+        self.blocks = [x for x in self.dummy._mgr.blocks]
+
+        self.blk_values = [block.values for block in self.dummy._mgr.blocks]
+
+        for values in self.blk_values:
+            set_array_not_contiguous(values)
+
+        self.nblocks = len(self.blk_values)
+        # See the comment in indexes/base.py about _index_data.
+        # We need this for EA-backed indexes that have a reference to a 1-d
+        # ndarray like datetime / timedelta / period.
+        self.idx_slider = Slider(
+            self.frame.index._index_data, self.dummy.index._index_data)
+
+        self.base_ptrs = <char**>malloc(sizeof(char*) * self.nblocks)
+        for i, block in enumerate(self.blk_values):
+            self.base_ptrs[i] = (<ndarray>block).data
+
+    def __dealloc__(self):
+        free(self.base_ptrs)
+
+    cdef move(self, int start, int end):
+        cdef:
+            ndarray arr
+            Py_ssize_t i
+
+        self._restore_blocks()
+
+        # move blocks
+        for i in range(self.nblocks):
+            arr = self.blk_values[i]
+
+            # axis=1 is the frame's axis=0
+            arr.data = self.base_ptrs[i] + arr.strides[1] * start
+            arr.shape[1] = end - start
+
+        # move and set the index
+        self.idx_slider.move(start, end)
+
+        object.__setattr__(self.index, '_index_data', self.idx_slider.buf)
+        self.index._engine.clear_mapping()
+        self.index._cache.clear()  # e.g. inferred_freq must go
+
+    cdef reset(self):
+        cdef:
+            ndarray arr
+            Py_ssize_t i
+
+        self._restore_blocks()
+
+        for i in range(self.nblocks):
+            arr = self.blk_values[i]
+
+            # axis=1 is the frame's axis=0
+            arr.data = self.base_ptrs[i]
+            arr.shape[1] = 0
+
+    cdef _restore_blocks(self):
+        """
+        Ensure that we have the original blocks, blknos, and blklocs.
+        """
+        mgr = self.dummy._mgr
+        mgr.blocks = self.blocks
+        mgr._blklocs = self.orig_blklocs
+        mgr._blknos = self.orig_blknos
